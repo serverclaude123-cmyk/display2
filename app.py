@@ -9,10 +9,11 @@
 # local dashboard does.
 #
 # Credentials come from Streamlit secrets, not from this file — see
-# .streamlit/secrets.toml.example. If this folder is ever pushed to a
-# public GitHub repo for Streamlit Community Cloud deployment, the actual
+# .streamlit/secrets.toml.example (a nested [mqtt] table: host/port/
+# username/password/topic/tls). If this folder is ever pushed to a public
+# GitHub repo for Streamlit Community Cloud deployment, the actual
 # secrets.toml must NOT go with it (see .gitignore); paste the same
-# key/value pairs into the app's own Settings -> Secrets panel instead.
+# content into the app's own Settings -> Secrets panel instead.
 
 import json
 import ssl
@@ -24,23 +25,32 @@ import pandas as pd
 import paho.mqtt.client as mqtt
 import streamlit as st
 
-TOPIC_STATE = "powermeter/meter02/state"
-TOPIC_CMD = "powermeter/meter02/cmd"
 HISTORY_MAXLEN = 500  # ~ a few hours at one MQTT message per ~2s
 
 st.set_page_config(page_title="Power Meter — Live Dashboard", layout="wide")
 
 
-def _secret(key):
-    val = st.secrets.get(key) if hasattr(st, "secrets") else None
-    if not val:
+def _mqtt_secret(key, default=None):
+    try:
+        val = st.secrets["mqtt"][key]
+    except Exception:
+        val = default
+    if val is None:
         st.error(
-            f"Missing secret `{key}`. Set it in `.streamlit/secrets.toml` "
-            "(local runs) or the app's Settings -> Secrets panel (Streamlit "
-            "Community Cloud) — see `.streamlit/secrets.toml.example`."
+            f"Missing secret `mqtt.{key}`. Set it under a `[mqtt]` table in "
+            "`.streamlit/secrets.toml` (local runs) or the app's Settings -> "
+            "Secrets panel (Streamlit Community Cloud) — see "
+            "`.streamlit/secrets.toml.example`."
         )
         st.stop()
     return val
+
+
+TOPIC_STATE = _mqtt_secret("topic")
+# No separate cmd-topic secret needed for the existing setup — the project's
+# convention everywhere else is "<...>/state" paired with "<...>/cmd", so
+# derive it the same way unless a cmd_topic secret overrides it.
+TOPIC_CMD = _mqtt_secret("cmd_topic", TOPIC_STATE.replace("/state", "/cmd"))
 
 
 @st.cache_resource
@@ -71,13 +81,14 @@ def get_mqtt_state():
             state["history"].append(data)
 
     client = mqtt.Client(client_id=f"streamlit-dashboard-{int(time.time())}")
-    client.username_pw_set(_secret("MQTT_USER"), _secret("MQTT_PASS"))
-    client.tls_set(cert_reqs=ssl.CERT_NONE)
-    client.tls_insecure_set(True)  # matches the ESP32 boards' setInsecure() — no CA pinned
+    client.username_pw_set(_mqtt_secret("username"), _mqtt_secret("password"))
+    if _mqtt_secret("tls", True):
+        client.tls_set(cert_reqs=ssl.CERT_NONE)
+        client.tls_insecure_set(True)  # matches the ESP32 boards' setInsecure() — no CA pinned
     client.on_connect = on_connect
     client.on_disconnect = on_disconnect
     client.on_message = on_message
-    client.connect(_secret("MQTT_HOST"), int(_secret("MQTT_PORT")), keepalive=30)
+    client.connect(_mqtt_secret("host"), int(_mqtt_secret("port")), keepalive=30)
     client.loop_start()  # background thread; the cache_resource singleton keeps it alive across reruns
 
     state["client"] = client
